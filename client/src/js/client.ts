@@ -11,8 +11,11 @@ const response = await fetch('/api/client', {
     method: 'POST',
     body: JSON.stringify(offer),
 });
-
-if (!response.ok) throw new Error('no host available yet');
+switch (response.status) {
+    case 201: break;
+    case 404: throw new Error('no host found');
+    default: throw new Error('unknown status code');
+}
 
 interface HostFound {
     /** Answer from the host stream. */
