@@ -1,0 +1,13 @@
+{
+    "name": "local-stream",
+    "version": "0.1.0",
+    "source": "src/index.html",
+    "scripts": {
+        "start": "parcel",
+        "build": "parcel build"
+    },
+    "devDependencies": {
+        "@types/node": "^18.0.6",
+        "parcel": "^2.6.2"
+    }
+}
