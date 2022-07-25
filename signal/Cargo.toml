@@ -1,3 +1,15 @@
 [package]
 name = "signal-server"
 version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+hyper = { version = "0.14", features = ["http1", "server", "tcp"] }
+tokio = { version = "1.20", features = ["rt"] }
+tokio-tungstenite = { version = "0.17", default-features = false }
+
+[dependencies.futures-util]
+version = "0.3"
+default-features = false
+features = ["sink"]
