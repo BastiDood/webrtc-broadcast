@@ -1,5 +1,5 @@
 [package]
-name = "signal-server"
+name = "signal"
 version = "0.1.0"
 edition = "2021"
 

@@ -357,7 +357,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "signal-server"
+name = "signal"
 version = "0.1.0"
 dependencies = [
  "anyhow",
