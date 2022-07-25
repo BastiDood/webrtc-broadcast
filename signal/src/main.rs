@@ -3,25 +3,28 @@ fn main() -> anyhow::Result<()> {
     use std::net;
 
     let tcp = net::TcpListener::bind((net::Ipv4Addr::UNSPECIFIED, 3000))?;
-    tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
-        .build()?
-        .block_on(async {
-            use core::future;
-            use hyper::service;
+        .build()?;
 
-            let service = service::make_service_fn(|_| {
-                future::ready(Ok::<_, Infallible>(service::service_fn(|_| {
-                    future::ready(Ok::<_, Infallible>(hyper::Response::new(
-                        hyper::Body::empty(),
-                    )))
-                })))
-            });
+    let future = {
+        use core::future;
+        use hyper::service;
 
-            hyper::Server::from_tcp(tcp)?
-                .http1_only(true)
-                .serve(service)
-                .await
-        })?;
+        let _guard = runtime.enter();
+        let service = service::make_service_fn(|_| {
+            future::ready(Ok::<_, Infallible>(service::service_fn(|_| {
+                future::ready(Ok::<_, Infallible>(hyper::Response::new(
+                    hyper::Body::empty(),
+                )))
+            })))
+        });
+
+        hyper::Server::from_tcp(tcp)?
+            .http1_only(true)
+            .serve(service)
+    };
+
+    runtime.block_on(future)?;
     Ok(())
 }
