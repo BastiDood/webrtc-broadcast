@@ -1,7 +1,7 @@
 import { config } from './peer';
 
 // Register new stream
-const response = await fetch('/api/stream', { method: 'POST' });
+const response = await fetch('/api/host', { method: 'POST' });
 switch (response.status) {
     case 201: break;
     case 401: throw new Error('host already exists');

@@ -5,12 +5,9 @@ const offer = await peer.createOffer({
     offerToReceiveVideo: true,
     offerToReceiveAudio: false,
 });
-
-if (offer.sdp === undefined)
-    throw new Error('no offer SDP available');
 await peer.setLocalDescription(offer);
 
-const response = await fetch('/api/stream', {
+const response = await fetch('/api/client', {
     method: 'POST',
     body: JSON.stringify(offer),
 });

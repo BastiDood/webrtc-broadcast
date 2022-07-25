@@ -1,3 +1,4 @@
+/** Default configuration for `RTCPeerConnection`. */
 export const config: RTCConfiguration = {
     iceServers: [
         {
