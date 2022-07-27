@@ -5,9 +5,13 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+flume = { version = "0.10", features = ["async"] }
 hyper = { version = "0.14", features = ["http1", "server", "tcp"] }
-tokio = { version = "1.20", features = ["rt"] }
+serde_json = { version = "1", default-features = false }
+slab = { version = "0.4", default-features = false }
+tokio = { version = "1.20", features = ["macros", "rt", "sync"] }
 tokio-tungstenite = { version = "0.17", default-features = false }
+webrtc = "0.4"
 
 [dependencies.futures-util]
 version = "0.3"

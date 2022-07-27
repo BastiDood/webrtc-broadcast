@@ -1,21 +1,23 @@
+mod state;
+mod ws;
+
 use hyper::{upgrade::OnUpgrade, Body, Request, Response, StatusCode};
 use tokio_tungstenite::tungstenite::Message;
 
 async fn handle_ws(up: OnUpgrade, mut callback: impl FnMut(Message)) {
     use futures_util::TryStreamExt;
+    use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
+
     let io = up.await.unwrap();
-    let mut stream = tokio_tungstenite::accept_async(io).await.unwrap();
+    let mut stream = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
     while let Some(msg) = stream.try_next().await.unwrap() {
         callback(msg);
     }
 }
 
 fn handle(req: Request<Body>) -> Result<Response<Body>, StatusCode> {
-    let path_and_query = req.uri().path_and_query().ok_or(StatusCode::BAD_REQUEST)?;
-    let path = path_and_query.path();
-    let query = path_and_query.query().unwrap_or_default();
-
     use hyper::{header, upgrade, Method};
+    let path = req.uri().path();
     match *req.method() {
         Method::GET => {
             let callback = match path {
@@ -24,7 +26,7 @@ fn handle(req: Request<Body>) -> Result<Response<Body>, StatusCode> {
                 _ => return Err(StatusCode::NOT_FOUND),
             };
 
-            let accept = signal::ws::validate_headers(req.headers()).ok_or(StatusCode::UPGRADE_REQUIRED)?;
+            let (accept, desc) = ws::validate_headers(req.headers()).ok_or(StatusCode::BAD_REQUEST)?;
             let value = HeaderValue::from_str(&accept).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             let up = upgrade::on(req);
             tokio::spawn(handle_ws(up, callback));
