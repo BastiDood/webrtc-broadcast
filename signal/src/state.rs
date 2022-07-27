@@ -155,8 +155,14 @@ impl State {
                 tokio::spawn(async move {
                     use webrtc::track::track_local::TrackLocalWriter;
                     while let Ok((packet, _)) = remote_track.read_rtp().await {
-                        if let Err(webrtc::Error::ErrClosedPipe) = local_track.write_rtp(&packet).await {
+                        let err = match local_track.write_rtp(&packet).await {
+                            Err(err) => err,
+                            _ => continue,
+                        };
+                        if let webrtc::Error::ErrClosedPipe = err {
                             break;
+                        } else {
+                            unimplemented!();
                         }
                     }
                 });
