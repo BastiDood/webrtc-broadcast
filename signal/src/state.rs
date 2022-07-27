@@ -1,14 +1,18 @@
 use hyper::{Body, Request, Response, StatusCode};
+use std::sync::Arc;
+use tokio::sync::broadcast;
 use webrtc::{
     api::API,
     ice_transport::ice_candidate::RTCIceCandidate,
     peer_connection::{sdp::session_description::RTCSessionDescription, RTCPeerConnection},
+    track::track_local::track_local_static_rtp::TrackLocalStaticRTP,
 };
 
 struct HostCreated {
     peer: RTCPeerConnection,
     answer: RTCSessionDescription,
     ice_rx: flume::Receiver<RTCIceCandidate>,
+    track_rx: broadcast::Receiver<Arc<TrackLocalStaticRTP>>,
 }
 
 pub struct State {
@@ -58,7 +62,7 @@ impl State {
             WebSocketStream,
         };
         if is_host {
-            let HostCreated { peer, answer, ice_rx } =
+            let HostCreated { peer, answer, ice_rx, track_rx } =
                 self.spawn_new_host(offer).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             tokio::spawn(async move {
@@ -107,10 +111,12 @@ impl State {
         use hyper::http::HeaderValue;
         let mut response = Response::new(Body::empty());
         *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+
         let headers = response.headers_mut();
         headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
         headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
         headers.insert(header::SEC_WEBSOCKET_ACCEPT, ws_accept);
+
         Ok(response)
     }
 
@@ -120,7 +126,6 @@ impl State {
         peer.add_transceiver_from_kind(webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video, &[]).await?;
         let answer = peer.create_answer(None).await?;
 
-        use core::future;
         let (ice_tx, ice_rx) = flume::unbounded();
         peer.on_ice_candidate(Box::new(move |maybe_ice| {
             let tx = ice_tx.clone();
@@ -128,12 +133,37 @@ impl State {
                 tx.send(ice).expect("ICE receiver closed");
             }
 
-            Box::pin(future::ready(()))
+            Box::pin(core::future::ready(()))
         }))
         .await;
 
-        peer.on_track(Box::new(|maybe_track, _| todo!())).await;
+        let (track_tx, track_rx) = broadcast::channel(8);
+        peer.on_track(Box::new(move |maybe_track, _| {
+            let tx = track_tx.clone();
+            Box::pin(async move {
+                let remote_track = match maybe_track {
+                    Some(track) => track,
+                    _ => return,
+                };
 
-        Ok(HostCreated { peer, answer, ice_rx })
+                use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters;
+                let RTCRtpCodecParameters { capability, .. } = remote_track.codec().await;
+                let local_track =
+                    Arc::new(TrackLocalStaticRTP::new(capability, "host-video".to_owned(), "host-stream".to_owned()));
+                tx.send(local_track.clone()).unwrap();
+
+                tokio::spawn(async move {
+                    use webrtc::track::track_local::TrackLocalWriter;
+                    while let Ok((packet, _)) = remote_track.read_rtp().await {
+                        if let Err(webrtc::Error::ErrClosedPipe) = local_track.write_rtp(&packet).await {
+                            break;
+                        }
+                    }
+                });
+            })
+        }))
+        .await;
+
+        Ok(HostCreated { peer, answer, ice_rx, track_rx })
     }
 }

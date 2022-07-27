@@ -9,7 +9,7 @@ flume = { version = "0.10", features = ["async"] }
 hyper = { version = "0.14", features = ["http1", "server", "tcp"] }
 serde_json = { version = "1", default-features = false }
 slab = { version = "0.4", default-features = false }
-tokio = { version = "1.20", features = ["rt", "sync"] }
+tokio = { version = "1.20", features = ["rt-multi-thread", "sync"] }
 tokio-tungstenite = { version = "0.17", default-features = false }
 webrtc = "0.4"
 

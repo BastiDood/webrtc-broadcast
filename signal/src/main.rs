@@ -55,7 +55,7 @@ fn main() -> anyhow::Result<()> {
     use std::net;
 
     let tcp = net::TcpListener::bind((net::Ipv4Addr::UNSPECIFIED, 3000))?;
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_io().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_io().build()?;
 
     let future = {
         use hyper::service;
