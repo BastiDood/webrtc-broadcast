@@ -62,7 +62,11 @@ impl State {
                 self.spawn_new_host(offer).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
             tokio::spawn(async move {
-                use futures_util::{SinkExt, TryStreamExt};
+                use futures_util::{
+                    future::{select, Either},
+                    SinkExt, TryStreamExt,
+                };
+
                 let io = upgrade_future.await.expect("failed to upgrade WebSocket");
                 let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
 
@@ -70,8 +74,8 @@ impl State {
                 ws.send(Message::Text(json)).await.expect("cannot send answer");
 
                 loop {
-                    tokio::select! {
-                        ice_result = ice_rx.recv_async() => {
+                    match select(ice_rx.recv_async(), ws.try_next()).await {
+                        Either::Left((ice_result, _)) => {
                             let ice = match ice_result {
                                 Ok(ice) => ice,
                                 _ => break,
@@ -79,7 +83,7 @@ impl State {
                             let json = serde_json::to_string(&ice).expect("ICE serialization failed");
                             ws.send(Message::Text(json)).await.expect("cannot send answer");
                         }
-                        msg_result = ws.try_next() => {
+                        Either::Right((msg_result, _)) => {
                             let msg = match msg_result.expect("stream exception") {
                                 Some(msg) => msg,
                                 _ => break,
