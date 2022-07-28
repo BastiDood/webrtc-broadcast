@@ -45,9 +45,15 @@ impl Host {
 
 struct HostCreated {
     peer: RTCPeerConnection,
-    answer: RTCSessionDescription,
+    answer: String,
     ice_rx: flume::Receiver<RTCIceCandidate>,
     track_rx: mpsc::UnboundedReceiver<Arc<TrackLocalStaticRTP>>,
+}
+
+struct ClientCreated {
+    peer: RTCPeerConnection,
+    answer: String,
+    ice_rx: flume::Receiver<RTCIceCandidate>,
 }
 
 pub struct State {
@@ -108,9 +114,7 @@ impl State {
 
                 let io = upgrade_future.await.expect("failed to upgrade WebSocket");
                 let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
-
-                let json = serde_json::to_string(&answer).expect("answer serialization failed");
-                ws.send(Message::Text(json)).await.expect("cannot send answer");
+                ws.send(Message::Text(answer)).await.expect("cannot send answer");
 
                 // Wait for single track from host
                 let track = track_rx.recv().await.expect("track sender closed");
@@ -144,7 +148,48 @@ impl State {
                 }
             });
         } else {
-            todo!()
+            let ClientCreated { peer, answer, ice_rx } = self
+                .spawn_new_client(offer)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+            tokio::spawn(async move {
+                use futures_util::{
+                    future::{select, Either},
+                    SinkExt, TryStreamExt,
+                };
+
+                let io = upgrade_future.await.expect("failed to upgrade WebSocket");
+                let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+                ws.send(Message::Text(answer)).await.expect("cannot send answer");
+
+                loop {
+                    match select(ice_rx.recv_async(), ws.try_next()).await {
+                        Either::Left((ice_result, _)) => {
+                            let ice = match ice_result {
+                                Ok(ice) => ice,
+                                _ => break,
+                            };
+                            let json = serde_json::to_string(&ice).expect("ICE serialization failed");
+                            ws.send(Message::Text(json)).await.expect("cannot send ICE candidate");
+                        }
+                        Either::Right((msg_result, _)) => {
+                            let msg = match msg_result.expect("stream exception") {
+                                Some(msg) => msg,
+                                _ => break,
+                            };
+                            let txt = match msg {
+                                Message::Text(txt) => txt,
+                                Message::Close(_) => break,
+                                _ => continue,
+                            };
+                            let ice = serde_json::from_str(&txt).expect("ICE deserialization failed");
+                            peer.add_ice_candidate(ice).await.expect("cannot add ICE candidate");
+                        }
+                    }
+                }
+            });
         }
 
         // Announce switching protocols to the client
@@ -164,7 +209,10 @@ impl State {
         let peer = self.api.new_peer_connection(Default::default()).await?;
         peer.set_remote_description(offer).await?;
         peer.add_transceiver_from_kind(RTPCodecType::Video, &[]).await?;
-        let answer = peer.create_answer(None).await?;
+
+        let desc = peer.create_answer(None).await?;
+        let answer = serde_json::to_string(&desc).unwrap();
+        peer.set_local_description(desc).await?;
 
         let (ice_tx, ice_rx) = flume::unbounded();
         peer.on_ice_candidate(Box::new(move |maybe_ice| {
@@ -213,11 +261,32 @@ impl State {
         Ok(HostCreated { peer, answer, ice_rx, track_rx })
     }
 
-    async fn spawn_new_client(&self, offer: RTCSessionDescription) -> webrtc::error::Result<()> {
+    async fn spawn_new_client(&self, offer: RTCSessionDescription) -> webrtc::error::Result<Option<ClientCreated>> {
+        let local_track = match self.host.read().await.get_ready() {
+            Some(track) => track,
+            _ => return Ok(None),
+        };
+
         let peer = self.api.new_peer_connection(Default::default()).await?;
         peer.set_remote_description(offer).await?;
-        let answer = peer.create_answer(None).await?;
+        peer.add_track(local_track).await?;
 
-        Ok(())
+        let desc = peer.create_answer(None).await?;
+        let answer = serde_json::to_string(&desc).unwrap();
+        peer.set_local_description(desc).await?;
+
+        // TODO: relay ICE candidates
+        let (ice_tx, ice_rx) = flume::unbounded();
+        peer.on_ice_candidate(Box::new(move |maybe_ice| {
+            let tx = ice_tx.clone();
+            if let Some(ice) = maybe_ice {
+                tx.send(ice).expect("ICE receiver closed");
+            }
+
+            Box::pin(core::future::ready(()))
+        }))
+        .await;
+
+        Ok(Some(ClientCreated { peer, answer, ice_rx }))
     }
 }
