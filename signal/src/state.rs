@@ -1,23 +1,59 @@
 use hyper::{Body, Request, Response, StatusCode};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{mpsc, RwLock};
 use webrtc::{
     api::API,
     ice_transport::ice_candidate::RTCIceCandidate,
     peer_connection::{sdp::session_description::RTCSessionDescription, RTCPeerConnection},
+    rtp_transceiver::rtp_codec::RTPCodecType,
     track::track_local::track_local_static_rtp::TrackLocalStaticRTP,
 };
+
+#[derive(Default)]
+enum Host {
+    #[default]
+    None,
+    Pending,
+    Ready(Arc<TrackLocalStaticRTP>),
+}
+
+impl Host {
+    fn get_ready(&self) -> Option<Arc<TrackLocalStaticRTP>> {
+        if let Self::Ready(track) = self {
+            Some(track.clone())
+        } else {
+            None
+        }
+    }
+
+    fn set_pending(&mut self) {
+        if let Self::None = self {
+            *self = Self::Pending;
+        } else {
+            unreachable!();
+        }
+    }
+
+    fn set_ready(&mut self, track: Arc<TrackLocalStaticRTP>) {
+        if let Self::Pending = self {
+            *self = Self::Ready(track);
+        } else {
+            unreachable!();
+        }
+    }
+}
 
 struct HostCreated {
     peer: RTCPeerConnection,
     answer: RTCSessionDescription,
     ice_rx: flume::Receiver<RTCIceCandidate>,
-    track_rx: broadcast::Receiver<Arc<TrackLocalStaticRTP>>,
+    track_rx: mpsc::UnboundedReceiver<Arc<TrackLocalStaticRTP>>,
 }
 
 pub struct State {
     /// WebRTC global API manager. Used for creating new peer connections.
     api: API,
+    host: RwLock<Host>,
 }
 
 impl State {
@@ -32,25 +68,21 @@ impl State {
         let registry = register_default_interceptors(Registry::new(), &mut media)?;
         let api = APIBuilder::new().with_media_engine(media).with_interceptor_registry(registry).build();
 
-        Ok(Self { api })
+        Ok(Self { api, host: RwLock::default() })
     }
 
-    pub async fn on_request(&self, req: Request<Body>) -> Result<Response<Body>, StatusCode> {
+    pub async fn on_request(self: Arc<Self>, req: Request<Body>) -> Result<Response<Body>, StatusCode> {
         use hyper::{header, upgrade, Method};
 
         if *req.method() != Method::GET {
             return Err(StatusCode::METHOD_NOT_ALLOWED);
         }
 
-        let path_and_query = req.uri().path_and_query().ok_or(StatusCode::BAD_REQUEST)?;
-        let is_host = match path_and_query.path() {
+        let is_host = match req.uri().path() {
             "/ws/client" => false,
             "/ws/host" => true,
             _ => return Err(StatusCode::NOT_FOUND),
         };
-
-        // TODO: Check if a host with the same name already exists
-        let query = path_and_query.query();
 
         // Perform WebSocket handshake
         let (accept, offer) = super::ws::validate_headers(req.headers()).ok_or(StatusCode::BAD_REQUEST)?;
@@ -62,8 +94,11 @@ impl State {
             WebSocketStream,
         };
         if is_host {
-            let HostCreated { peer, answer, ice_rx, track_rx } =
+            let HostCreated { peer, answer, ice_rx, mut track_rx } =
                 self.spawn_new_host(offer).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            self.host.write().await.set_pending();
+            let this = self.clone();
 
             tokio::spawn(async move {
                 use futures_util::{
@@ -77,6 +112,11 @@ impl State {
                 let json = serde_json::to_string(&answer).expect("answer serialization failed");
                 ws.send(Message::Text(json)).await.expect("cannot send answer");
 
+                // Wait for single track from host
+                let track = track_rx.recv().await.expect("track sender closed");
+                drop(track_rx);
+                this.host.write().await.set_ready(track);
+
                 loop {
                     match select(ice_rx.recv_async(), ws.try_next()).await {
                         Either::Left((ice_result, _)) => {
@@ -85,7 +125,7 @@ impl State {
                                 _ => break,
                             };
                             let json = serde_json::to_string(&ice).expect("ICE serialization failed");
-                            ws.send(Message::Text(json)).await.expect("cannot send answer");
+                            ws.send(Message::Text(json)).await.expect("cannot send ICE candidate");
                         }
                         Either::Right((msg_result, _)) => {
                             let msg = match msg_result.expect("stream exception") {
@@ -123,7 +163,7 @@ impl State {
     async fn spawn_new_host(&self, offer: RTCSessionDescription) -> webrtc::error::Result<HostCreated> {
         let peer = self.api.new_peer_connection(Default::default()).await?;
         peer.set_remote_description(offer).await?;
-        peer.add_transceiver_from_kind(webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video, &[]).await?;
+        peer.add_transceiver_from_kind(RTPCodecType::Video, &[]).await?;
         let answer = peer.create_answer(None).await?;
 
         let (ice_tx, ice_rx) = flume::unbounded();
@@ -137,7 +177,7 @@ impl State {
         }))
         .await;
 
-        let (track_tx, track_rx) = broadcast::channel(8);
+        let (track_tx, track_rx) = mpsc::unbounded_channel();
         peer.on_track(Box::new(move |maybe_track, _| {
             let tx = track_tx.clone();
             Box::pin(async move {
@@ -150,7 +190,7 @@ impl State {
                 let RTCRtpCodecParameters { capability, .. } = remote_track.codec().await;
                 let local_track =
                     Arc::new(TrackLocalStaticRTP::new(capability, "host-video".to_owned(), "host-stream".to_owned()));
-                tx.send(local_track.clone()).unwrap();
+                tx.send(local_track.clone()).expect("track channel closed");
 
                 tokio::spawn(async move {
                     use webrtc::track::track_local::TrackLocalWriter;
@@ -171,5 +211,13 @@ impl State {
         .await;
 
         Ok(HostCreated { peer, answer, ice_rx, track_rx })
+    }
+
+    async fn spawn_new_client(&self, offer: RTCSessionDescription) -> webrtc::error::Result<()> {
+        let peer = self.api.new_peer_connection(Default::default()).await?;
+        peer.set_remote_description(offer).await?;
+        let answer = peer.create_answer(None).await?;
+
+        Ok(())
     }
 }
