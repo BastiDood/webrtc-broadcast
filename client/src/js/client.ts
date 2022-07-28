@@ -1,8 +1,8 @@
-import { strict as assert } from 'assert';
 import { config } from './peer';
 
 const video = document.getElementById('screen');
-assert(video instanceof HTMLVideoElement);
+const isVideo = video instanceof HTMLVideoElement;
+if (!isVideo) throw new Error('no video found');
 
 const peer = new RTCPeerConnection(config);
 const offer = await peer.createOffer();
@@ -33,7 +33,7 @@ ws.addEventListener('open', function() {
 
         // And then relay the track to the video
         peer.addEventListener('track', ({ streams }) => {
-            assert(streams.length === 1);
+            console.assert(streams.length === 1);
             video.srcObject = streams[0];
         }, { passive: true, once: true });
     }, { passive: true });

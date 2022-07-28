@@ -1,5 +1,9 @@
 import { config } from './peer';
 
+const video = document.getElementById('screen');
+const isVideo = video instanceof HTMLVideoElement;
+if (!isVideo) throw new Error('no video found');
+
 const peer = new RTCPeerConnection(config);
 const offer = await peer.createOffer();
 await peer.setLocalDescription(offer);
@@ -30,6 +34,7 @@ ws.addEventListener('open', function() {
 
         // Only request camera permissions when handshake is done
         const media = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        for (const track of media.getVideoTracks()) peer.addTrack(track);
+        video.srcObject = media;
+        for (const track of media.getVideoTracks()) peer.addTrack(track)
     }, { passive: true });
 }, { passive: true, once: true });

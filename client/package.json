@@ -1,7 +1,7 @@
 {
     "name": "local-stream",
     "version": "0.1.0",
-    "source": "src/index.html",
+    "source": ["src/client.html", "src/host.html"],
     "scripts": {
         "start": "parcel",
         "build": "parcel build"
