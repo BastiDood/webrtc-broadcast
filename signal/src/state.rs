@@ -1,6 +1,6 @@
 use hyper::{Body, Request, Response, StatusCode};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use webrtc::{
     api::API,
     ice_transport::ice_candidate::RTCIceCandidate,
@@ -27,11 +27,11 @@ impl Host {
     }
 
     fn set_pending(&mut self) {
-        if let Self::None = self {
-            *self = Self::Pending;
-        } else {
-            unreachable!();
-        }
+        *self = match self {
+            Self::None => Self::Pending,
+            Self::Pending => todo!(),
+            _ => unreachable!(),
+        };
     }
 
     fn set_ready(&mut self, track: Arc<TrackLocalStaticRTP>) {
@@ -47,7 +47,7 @@ struct HostCreated {
     peer: RTCPeerConnection,
     answer: String,
     ice_rx: flume::Receiver<RTCIceCandidate>,
-    track_rx: mpsc::UnboundedReceiver<Arc<TrackLocalStaticRTP>>,
+    track_rx: flume::Receiver<Arc<TrackLocalStaticRTP>>,
 }
 
 struct ClientCreated {
@@ -99,98 +99,64 @@ impl State {
             tungstenite::protocol::{Message, Role},
             WebSocketStream,
         };
-        if is_host {
-            let HostCreated { peer, answer, ice_rx, mut track_rx } =
-                self.spawn_new_host(offer).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+        let (peer, answer, ice_rx, maybe_host) = if is_host {
+            let HostCreated { peer, answer, ice_rx, track_rx } =
+                self.spawn_new_host(offer).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             self.host.write().await.set_pending();
             let this = self.clone();
-
-            tokio::spawn(async move {
-                use futures_util::{
-                    future::{select, Either},
-                    SinkExt, TryStreamExt,
-                };
-
-                let io = upgrade_future.await.expect("failed to upgrade WebSocket");
-                let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
-                ws.send(Message::Text(answer)).await.expect("cannot send answer");
-
-                // Wait for single track from host
-                let track = track_rx.recv().await.expect("track sender closed");
-                drop(track_rx);
-                this.host.write().await.set_ready(track);
-
-                loop {
-                    match select(ice_rx.recv_async(), ws.try_next()).await {
-                        Either::Left((ice_result, _)) => {
-                            let ice = match ice_result {
-                                Ok(ice) => ice,
-                                _ => break,
-                            };
-                            let json = serde_json::to_string(&ice).expect("ICE serialization failed");
-                            ws.send(Message::Text(json)).await.expect("cannot send ICE candidate");
-                        }
-                        Either::Right((msg_result, _)) => {
-                            let msg = match msg_result.expect("stream exception") {
-                                Some(msg) => msg,
-                                _ => break,
-                            };
-                            let txt = match msg {
-                                Message::Text(txt) => txt,
-                                Message::Close(_) => break,
-                                _ => continue,
-                            };
-                            let ice = serde_json::from_str(&txt).expect("ICE deserialization failed");
-                            peer.add_ice_candidate(ice).await.expect("cannot add ICE candidate");
-                        }
-                    }
-                }
-            });
+            (peer, answer, ice_rx, Some((track_rx, this)))
         } else {
             let ClientCreated { peer, answer, ice_rx } = self
                 .spawn_new_client(offer)
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+            (peer, answer, ice_rx, None)
+        };
 
-            tokio::spawn(async move {
-                use futures_util::{
-                    future::{select, Either},
-                    SinkExt, TryStreamExt,
-                };
+        tokio::spawn(async move {
+            use futures_util::{
+                future::{select, Either},
+                SinkExt, TryStreamExt,
+            };
 
-                let io = upgrade_future.await.expect("failed to upgrade WebSocket");
-                let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
-                ws.send(Message::Text(answer)).await.expect("cannot send answer");
+            let io = upgrade_future.await.expect("failed to upgrade WebSocket");
+            let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+            ws.send(Message::Text(answer)).await.expect("cannot send answer");
 
-                loop {
-                    match select(ice_rx.recv_async(), ws.try_next()).await {
-                        Either::Left((ice_result, _)) => {
-                            let ice = match ice_result {
-                                Ok(ice) => ice,
-                                _ => break,
-                            };
-                            let json = serde_json::to_string(&ice).expect("ICE serialization failed");
-                            ws.send(Message::Text(json)).await.expect("cannot send ICE candidate");
-                        }
-                        Either::Right((msg_result, _)) => {
-                            let msg = match msg_result.expect("stream exception") {
-                                Some(msg) => msg,
-                                _ => break,
-                            };
-                            let txt = match msg {
-                                Message::Text(txt) => txt,
-                                Message::Close(_) => break,
-                                _ => continue,
-                            };
-                            let ice = serde_json::from_str(&txt).expect("ICE deserialization failed");
-                            peer.add_ice_candidate(ice).await.expect("cannot add ICE candidate");
-                        }
+            // Wait for single track from host
+            if let Some((track_rx, this)) = maybe_host {
+                let track = track_rx.recv_async().await.expect("track sender closed");
+                this.host.write().await.set_ready(track);
+            }
+
+            loop {
+                match select(ice_rx.recv_async(), ws.try_next()).await {
+                    Either::Left((ice_result, _)) => {
+                        let ice = match ice_result {
+                            Ok(ice) => ice,
+                            _ => break,
+                        };
+                        let json = serde_json::to_string(&ice).expect("ICE serialization failed");
+                        ws.send(Message::Text(json)).await.expect("cannot send ICE candidate");
+                    }
+                    Either::Right((msg_result, _)) => {
+                        let msg = match msg_result.expect("stream exception") {
+                            Some(msg) => msg,
+                            _ => break,
+                        };
+                        let txt = match msg {
+                            Message::Text(txt) => txt,
+                            Message::Close(_) => break,
+                            _ => continue,
+                        };
+                        let ice = serde_json::from_str(&txt).expect("ICE deserialization failed");
+                        peer.add_ice_candidate(ice).await.expect("cannot add ICE candidate");
                     }
                 }
-            });
-        }
+            }
+        });
 
         // Announce switching protocols to the client
         use hyper::http::HeaderValue;
@@ -225,7 +191,7 @@ impl State {
         }))
         .await;
 
-        let (track_tx, track_rx) = mpsc::unbounded_channel();
+        let (track_tx, track_rx) = flume::unbounded();
         peer.on_track(Box::new(move |maybe_track, _| {
             let tx = track_tx.clone();
             Box::pin(async move {
