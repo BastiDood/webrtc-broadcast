@@ -91,38 +91,44 @@ impl State {
         };
 
         // Perform WebSocket handshake
-        let (accept, offer) = super::ws::validate_headers(req.headers()).ok_or(StatusCode::BAD_REQUEST)?;
+        let accept = super::ws::validate_headers(req.headers()).ok_or(StatusCode::BAD_REQUEST)?;
         let ws_accept = HeaderValue::from_str(&accept).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let upgrade_future = upgrade::on(req);
-
-        use tokio_tungstenite::{
-            tungstenite::protocol::{Message, Role},
-            WebSocketStream,
-        };
-
-        let (peer, answer, ice_rx, maybe_host) = if is_host {
-            let HostCreated { peer, answer, ice_rx, track_rx } =
-                self.spawn_new_host(offer).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            self.host.write().await.set_pending();
-            let this = self.clone();
-            (peer, answer, ice_rx, Some((track_rx, this)))
-        } else {
-            let ClientCreated { peer, answer, ice_rx } = self
-                .spawn_new_client(offer)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-            (peer, answer, ice_rx, None)
-        };
 
         tokio::spawn(async move {
             use futures_util::{
                 future::{select, Either},
                 SinkExt, TryStreamExt,
             };
+            use tokio_tungstenite::{
+                tungstenite::protocol::{Message, Role},
+                WebSocketStream,
+            };
 
             let io = upgrade_future.await.expect("failed to upgrade WebSocket");
             let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+
+            // Try to receive the offer first
+            let msg = ws.try_next().await.expect("cannot retrieve offer").expect("stream closed");
+            let offer = if let Message::Text(json) = msg {
+                serde_json::from_str(&json).expect("cannot deserialize offer")
+            } else {
+                unreachable!("unexpected message type");
+            };
+
+            // Generate server's answer
+            let (peer, answer, ice_rx, maybe_host) = if is_host {
+                let HostCreated { peer, answer, ice_rx, track_rx } =
+                    self.spawn_new_host(offer).await.expect("cannot spawn new peer connection");
+                self.host.write().await.set_pending();
+                let this = self.clone();
+                (peer, answer, ice_rx, Some((track_rx, this)))
+            } else {
+                let ClientCreated { peer, answer, ice_rx } =
+                    self.spawn_new_client(offer).await.expect("cannot spawn new client").expect("no host found");
+                (peer, answer, ice_rx, None)
+            };
+
             ws.send(Message::Text(answer)).await.expect("cannot send answer");
 
             // Wait for single track from host
