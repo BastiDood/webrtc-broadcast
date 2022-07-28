@@ -1,45 +1,35 @@
 import { config } from './peer';
 
-// Register new stream
-const response = await fetch('/api/host', { method: 'POST' });
-switch (response.status) {
-    case 201: break;
-    case 401: throw new Error('host already exists');
-    default: throw new Error('unknown status code');
-}
+const peer = new RTCPeerConnection(config);
+const offer = await peer.createOffer();
+await peer.setLocalDescription(offer);
 
-const remotes: RTCPeerConnection[] = [];
+const ws = new WebSocket('/ws/host', JSON.stringify(offer));
 
-interface NewClient {
-    offer: RTCSessionDescriptionInit;
-    code: string;
-}
+ws.addEventListener('open', function() {
+    let hasAnswer = false;
+    this.addEventListener('message', async function({ data }) {
+        if (typeof data !== 'string') throw new Error('non-string ICE candidate');
 
-const code = await response.text();
-const ws = new WebSocket('/ws/host?code=' + code);
-ws.addEventListener('message', async ({ data }) => {
-    if (typeof data !== 'string') return;
+        const init = JSON.parse(data);
+        if (hasAnswer) {
+            await peer.addIceCandidate(init);
+            return;
+        }
 
-    const { offer, code }: NewClient = JSON.parse(data);
-    const peer = new RTCPeerConnection(config);
-    await peer.setRemoteDescription(offer);
+        // Finish the handshake
+        hasAnswer = true;
+        await peer.setRemoteDescription(init);
 
-    const answer = await peer.createAnswer();
-    await peer.setLocalDescription(answer);
-    ws.send(JSON.stringify({
-        code,
-        answer,
-    }))
+        // Only start sending ice candidates from this point on
+        peer.addEventListener('icecandidate', ({ candidate }) => {
+            if (candidate === null) throw new Error('null candidate');
+            const json = candidate.toJSON();
+            this.send(JSON.stringify(json));
+        }, { passive: true });
 
-    peer.addEventListener('icecandidate', ({ candidate }) => {
-        if (candidate === null) return;
-        const json = candidate.toJSON();
-        ws.send(JSON.stringify({
-            code,
-            ice: json,
-        }));
-    });
-
-    remotes.push(peer);
-});
-
+        // Only request camera permissions when handshake is done
+        const media = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        for (const track of media.getVideoTracks()) peer.addTrack(track);
+    }, { passive: true });
+}, { passive: true, once: true });
