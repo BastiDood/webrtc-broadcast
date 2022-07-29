@@ -5,43 +5,46 @@ async function main() {
     const isVideo = video instanceof HTMLVideoElement;
     if (!isVideo) throw new Error('no video found');
 
+    // Attempt to connect first and block until open
+    const ws = new WebSocket(process.env.WS_HOST!);
+    await new Promise(resolve => ws.addEventListener('open', resolve, {
+        passive: true,
+        once: true,
+    }));
+
+    // Wait for remote peer's offer
+    const offer: RTCSessionDescriptionInit = await new Promise(resolve => ws.addEventListener(
+        'message',
+        ({ data }) => resolve(JSON.parse(data)),
+        { passive: true, once: true, },
+    ));
+
+    // Respond to the remote with an answer
     const peer = new RTCPeerConnection(config);
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
+    await peer.setRemoteDescription(offer);
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
+    ws.send(JSON.stringify(answer));
 
-    const ws = new WebSocket(process.env.WS_CLIENT!, 'livestream');
-    ws.addEventListener('open', function() {
-        // Send over the offer first
-        this.send(JSON.stringify(offer));
+    peer.addEventListener('icecandidate', ({ candidate }) => {
+        if (candidate === null)
+            throw new Error('null candidate');
+        const json = candidate.toJSON();
+        ws.send(JSON.stringify(json));
+    }, { passive: true });
 
-        let hasAnswer = false;
-        this.addEventListener('message', async function({ data }) {
-            if (typeof data !== 'string') throw new Error('non-string ICE candidate');
-
-            const init = JSON.parse(data);
-            if (hasAnswer) {
-                await peer.addIceCandidate(init);
-                return;
-            }
-
-            // Finish the handshake
-            hasAnswer = true;
-            await peer.setRemoteDescription(init);
-
-            // Only start sending ice candidates from this point on
-            peer.addEventListener('icecandidate', ({ candidate }) => {
-                if (candidate === null) throw new Error('null candidate');
-                const json = candidate.toJSON();
-                this.send(JSON.stringify(json));
-            }, { passive: true });
-
-            // And then relay the track to the video
-            peer.addEventListener('track', ({ streams }) => {
-                console.assert(streams.length === 1);
-                video.srcObject = streams[0];
-            }, { passive: true, once: true });
-        }, { passive: true });
+    peer.addEventListener('track', ({ streams }) => {
+        if (streams.length !== 1)
+            throw new Error('too many streams');
+        video.srcObject = streams[0];
     }, { passive: true, once: true });
+
+    ws.addEventListener('message', ({ data }) => {
+        if (typeof data !== 'string')
+            throw new Error('non-string ICE candidate');
+        const json = JSON.parse(data);
+        return peer.addIceCandidate(json);
+    }, { passive: true });
 }
 
 main();
