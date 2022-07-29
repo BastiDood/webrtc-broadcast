@@ -6,7 +6,7 @@ fn main() -> anyhow::Result<()> {
     use std::{net, sync::Arc};
 
     let tcp = net::TcpListener::bind((net::Ipv4Addr::UNSPECIFIED, 3000))?;
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_io().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_io().enable_time().build()?;
     let state = Arc::new(state::State::try_new()?);
 
     let future = {

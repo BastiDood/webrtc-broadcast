@@ -8,7 +8,6 @@ pub fn validate_headers(headers: &hyper::HeaderMap) -> Option<Box<str>> {
     if headers.get(header::CONNECTION)?.as_bytes() != b"Upgrade"
         || headers.get(header::UPGRADE)?.as_bytes() != b"websocket"
         || headers.get(header::SEC_WEBSOCKET_VERSION)?.as_bytes() != b"13"
-        || headers.get(header::SEC_WEBSOCKET_PROTOCOL)?.as_bytes() != b"livestream"
     {
         return None;
     }

@@ -18,9 +18,9 @@ enum Host {
 }
 
 impl Host {
-    fn get_ready(&self) -> Option<Arc<TrackLocalStaticRTP>> {
+    fn get_ready(&self) -> Option<&Arc<TrackLocalStaticRTP>> {
         if let Self::Ready(track) = self {
-            Some(track.clone())
+            Some(track)
         } else {
             None
         }
@@ -52,7 +52,7 @@ struct HostCreated {
 
 struct ClientCreated {
     peer: RTCPeerConnection,
-    answer: String,
+    offer: String,
     ice_rx: flume::Receiver<RTCIceCandidate>,
 }
 
@@ -108,51 +108,51 @@ impl State {
             let io = upgrade_future.await.expect("failed to upgrade WebSocket");
             let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
 
-            // Try to receive the offer first
-            let msg = ws.try_next().await.expect("cannot retrieve offer").expect("stream closed");
-            let offer = if let Message::Text(json) = msg {
-                serde_json::from_str(&json).expect("cannot deserialize offer")
-            } else {
-                unreachable!("unexpected message type");
-            };
+            let (peer, desc, ice_rx, maybe_host) = if is_host {
+                // Wait for the host to send an offer first
+                let msg =
+                    ws.try_next().await.expect("cannot retrieve offer").expect("stream closed").into_text().unwrap();
+                let offer = serde_json::from_str(&msg).expect("cannot deserialize offer");
 
-            // Generate server's answer
-            let (peer, answer, ice_rx, maybe_host) = if is_host {
                 let HostCreated { peer, answer, ice_rx, track_rx } =
                     self.spawn_new_host(offer).await.expect("cannot spawn new peer connection");
                 self.host.write().await.set_pending();
+
                 let this = self.clone();
                 (peer, answer, ice_rx, Some((track_rx, this)))
             } else {
-                let ClientCreated { peer, answer, ice_rx } =
-                    self.spawn_new_client(offer).await.expect("cannot spawn new client").expect("no host found");
-                (peer, answer, ice_rx, None)
+                let host = self.host.read().await;
+                let local_track = host.get_ready().expect("no host found");
+                let ClientCreated { peer, offer, ice_rx } =
+                    self.spawn_new_client(local_track).await.expect("cannot spawn new client");
+                (peer, offer, ice_rx, None)
             };
 
-            ws.send(Message::Text(answer)).await.expect("cannot send answer");
+            ws.send(Message::Text(desc)).await.expect("cannot send SDP");
 
-            // Wait for single track from host
             if let Some((track_rx, this)) = maybe_host {
+                // Wait for single track from host
+                dbg!("Waiting for new track...");
                 let track = track_rx.recv_async().await.expect("track sender closed");
                 this.host.write().await.set_ready(track);
+                dbg!("Track is ready!");
+            } else {
+                // Wait for remote peer's answer
+                let msg =
+                    ws.try_next().await.expect("cannot retrieve offer").expect("stream closed").into_text().unwrap();
+                let answer = serde_json::from_str(&msg).expect("cannot deserialize offer");
+                peer.set_remote_description(answer).await.unwrap();
             }
 
             loop {
                 match select(ice_rx.recv_async(), ws.try_next()).await {
                     Either::Left((ice_result, _)) => {
-                        let ice = match ice_result {
-                            Ok(ice) => ice,
-                            _ => break,
-                        };
+                        let ice = ice_result.expect("ICE sender closed");
                         let json = serde_json::to_string(&ice).expect("ICE serialization failed");
                         ws.send(Message::Text(json)).await.expect("cannot send ICE candidate");
                     }
                     Either::Right((msg_result, _)) => {
-                        let msg = match msg_result.expect("stream exception") {
-                            Some(msg) => msg,
-                            _ => break,
-                        };
-                        let txt = match msg {
+                        let txt = match msg_result.expect("WebSocket stream error").expect("WebSocket stream closed") {
                             Message::Text(txt) => txt,
                             Message::Close(_) => break,
                             _ => continue,
@@ -179,18 +179,12 @@ impl State {
 
     async fn spawn_new_host(&self, offer: RTCSessionDescription) -> webrtc::error::Result<HostCreated> {
         let peer = self.api.new_peer_connection(Default::default()).await?;
-        peer.set_remote_description(offer).await?;
-        peer.add_transceiver_from_kind(RTPCodecType::Video, &[]).await?;
-
-        let desc = peer.create_answer(None).await?;
-        let answer = serde_json::to_string(&desc).unwrap();
-        peer.set_local_description(desc).await?;
 
         let (ice_tx, ice_rx) = flume::unbounded();
         peer.on_ice_candidate(Box::new(move |maybe_ice| {
             let tx = ice_tx.clone();
             if let Some(ice) = maybe_ice {
-                tx.send(ice).expect("ICE receiver closed");
+                let _ = tx.send(ice);
             }
 
             Box::pin(core::future::ready(()))
@@ -199,12 +193,15 @@ impl State {
 
         let (track_tx, track_rx) = flume::unbounded();
         peer.on_track(Box::new(move |maybe_track, _| {
+            dbg!("on_track event triggered...");
             let tx = track_tx.clone();
             Box::pin(async move {
                 let remote_track = match maybe_track {
                     Some(track) => track,
                     _ => return,
                 };
+
+                dbg!("New track detected!");
 
                 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters;
                 let RTCRtpCodecParameters { capability, .. } = remote_track.codec().await;
@@ -230,35 +227,34 @@ impl State {
         }))
         .await;
 
-        Ok(HostCreated { peer, answer, ice_rx, track_rx })
-    }
-
-    async fn spawn_new_client(&self, offer: RTCSessionDescription) -> webrtc::error::Result<Option<ClientCreated>> {
-        let local_track = match self.host.read().await.get_ready() {
-            Some(track) => track,
-            _ => return Ok(None),
-        };
-
-        let peer = self.api.new_peer_connection(Default::default()).await?;
         peer.set_remote_description(offer).await?;
-        peer.add_track(local_track).await?;
+        peer.add_transceiver_from_kind(RTPCodecType::Video, &[]).await?;
 
         let desc = peer.create_answer(None).await?;
         let answer = serde_json::to_string(&desc).unwrap();
         peer.set_local_description(desc).await?;
 
-        // TODO: relay ICE candidates
+        Ok(HostCreated { peer, answer, ice_rx, track_rx })
+    }
+
+    async fn spawn_new_client(&self, local_track: &Arc<TrackLocalStaticRTP>) -> webrtc::error::Result<ClientCreated> {
+        let peer = self.api.new_peer_connection(Default::default()).await?;
+        peer.add_track(local_track.clone()).await?;
+        let desc = peer.create_offer(Default::default()).await?;
+        let offer = serde_json::to_string(&desc).unwrap();
+        peer.set_local_description(desc).await?;
+
         let (ice_tx, ice_rx) = flume::unbounded();
         peer.on_ice_candidate(Box::new(move |maybe_ice| {
             let tx = ice_tx.clone();
             if let Some(ice) = maybe_ice {
-                tx.send(ice).expect("ICE receiver closed");
+                let _ = tx.send(ice);
             }
 
             Box::pin(core::future::ready(()))
         }))
         .await;
 
-        Ok(Some(ClientCreated { peer, answer, ice_rx }))
+        Ok(ClientCreated { peer, offer, ice_rx })
     }
 }
