@@ -21,22 +21,17 @@ async function main() {
 
     // Respond to the remote with an answer
     const peer = new RTCPeerConnection(config);
-    await peer.setRemoteDescription(offer);
-    const answer = await peer.createAnswer();
-    await peer.setLocalDescription(answer);
-    ws.send(JSON.stringify(answer));
 
     peer.addEventListener('icecandidate', ({ candidate }) => {
         if (candidate === null)
-            throw new Error('null candidate');
+            return;
         const json = candidate.toJSON();
         ws.send(JSON.stringify(json));
     }, { passive: true });
 
-    peer.addEventListener('track', ({ streams }) => {
-        if (streams.length !== 1)
-            throw new Error('too many streams');
-        video.srcObject = streams[0];
+    peer.addEventListener('track', ({ streams: [stream] }) => {
+        if (stream)
+            video.srcObject = stream;
     }, { passive: true, once: true });
 
     ws.addEventListener('message', ({ data }) => {
@@ -45,6 +40,11 @@ async function main() {
         const json = JSON.parse(data);
         return peer.addIceCandidate(json);
     }, { passive: true });
+
+    await peer.setRemoteDescription(offer);
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
+    ws.send(JSON.stringify(answer));
 }
 
 main();
