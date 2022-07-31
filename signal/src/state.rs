@@ -85,8 +85,6 @@ impl State {
             };
 
             let io = upgrade_future.await.expect("failed to upgrade WebSocket");
-            self.host.write().await.set_pending();
-
             let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
             let peer = self.api.new_peer_connection(Default::default()).await.unwrap();
 
@@ -101,18 +99,18 @@ impl State {
             .await;
 
             let maybe_track = if is_host {
+                // Mark this host as ready to receive
+                self.host.write().await.set_pending();
+
                 // Listen for new tracks
                 let (track_tx, track_rx) = flume::bounded(1);
                 peer.on_track(Box::new(move |maybe_track, _| {
-                    println!("on_track triggered!");
                     let tx = track_tx.clone();
                     Box::pin(async move {
                         let remote_track = match maybe_track {
                             Some(track) => track,
                             _ => return,
                         };
-
-                        println!("New track detected!");
 
                         let local_track = Arc::new(TrackLocalStaticRTP::new(
                             remote_track.codec().await.capability,
@@ -143,9 +141,9 @@ impl State {
                 let msg =
                     ws.try_next().await.expect("cannot retrieve offer").expect("stream closed").into_text().unwrap();
                 let offer = serde_json::from_str(&msg).expect("cannot deserialize offer");
-                peer.set_remote_description(offer).await.unwrap();
 
                 // Send reply to the remote
+                peer.set_remote_description(offer).await.unwrap();
                 let answer = peer.create_answer(None).await.unwrap();
                 let desc = serde_json::to_string(&answer).unwrap();
                 ws.send(Message::Text(desc)).await.expect("cannot send answer");
@@ -164,12 +162,12 @@ impl State {
                 ws.send(Message::Text(desc)).await.expect("cannot send offer");
 
                 // Wait for remote's answer
-                let msg =
+                let desc =
                     ws.try_next().await.expect("cannot retrieve offer").expect("stream closed").into_text().unwrap();
-                let answer = serde_json::from_str(&msg).expect("cannot deserialize offer");
-                peer.set_remote_description(answer).await.unwrap();
-                peer.set_local_description(offer).await.unwrap();
+                let answer = serde_json::from_str(&desc).expect("cannot deserialize offer");
 
+                peer.set_local_description(offer).await.unwrap();
+                peer.set_remote_description(answer).await.unwrap();
                 None
             };
 
@@ -189,12 +187,11 @@ impl State {
                         ws.send(Message::Text(json)).await.expect("cannot send ICE candidate");
                     }
                     msg_result = ws.try_next() => {
-                        let txt = match msg_result.expect("WebSocket stream error").expect("WebSocket stream closed") {
-                            Message::Text(txt) => txt,
+                        let ice = match msg_result.expect("WebSocket stream error").expect("WebSocket stream closed") {
+                            Message::Text(txt) => serde_json::from_str(&txt).expect("ICE deserialization failed"),
                             Message::Close(_) => break,
                             _ => continue,
                         };
-                        let ice = serde_json::from_str(&txt).expect("ICE deserialization failed");
                         peer.add_ice_candidate(ice).await.expect("cannot add ICE candidate");
                     }
                     track_result = track_fut => {
