@@ -16,19 +16,17 @@ fn main() -> anyhow::Result<()> {
             use core::future;
             let state_outer = state.clone();
             future::ready(Ok::<_, Infallible>(service::service_fn(move |req| {
-                use futures_util::{FutureExt, TryFutureExt};
-                state_outer
+                let response = state_outer
                     .clone()
                     .on_request(req)
                     .unwrap_or_else(|code| {
                         let mut response = Response::new(Body::empty());
                         *response.status_mut() = code;
                         response
-                    })
-                    .map(Ok::<_, Infallible>)
+                    });
+                future::ready(Ok::<_, Infallible>(response))
             })))
         });
-
         hyper::Server::from_tcp(tcp)?.http1_only(true).serve(service)
     };
 

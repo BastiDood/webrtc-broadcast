@@ -1535,7 +1535,6 @@ dependencies = [
  "futures-util",
  "hyper",
  "serde_json",
- "slab",
  "tokio",
  "tokio-tungstenite",
  "webrtc",
