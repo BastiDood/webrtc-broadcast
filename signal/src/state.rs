@@ -73,6 +73,7 @@ impl State {
         };
 
         // Perform WebSocket handshake
+        log::info!("WebSocket upgrade requested...");
         let accept = super::ws::validate_headers(req.headers()).ok_or(StatusCode::BAD_REQUEST)?;
         let ws_accept = HeaderValue::from_str(&accept).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let upgrade_future = upgrade::on(req);
@@ -85,11 +86,14 @@ impl State {
             };
 
             let io = upgrade_future.await.expect("failed to upgrade WebSocket");
+            log::info!("Upgraded to WebSocket.");
+
             let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
             let peer = self.api.new_peer_connection(Default::default()).await.unwrap();
 
             let (ice_tx, ice_rx) = flume::unbounded();
             peer.on_ice_candidate(Box::new(move |maybe_ice| {
+                log::info!("icecandidate event triggered!");
                 let tx = ice_tx.clone();
                 if let Some(ice) = maybe_ice {
                     let _ = tx.send(ice);
@@ -101,10 +105,12 @@ impl State {
             let maybe_track = if is_host {
                 // Mark this host as ready to receive
                 self.host.write().await.set_pending();
+                log::info!("Set host state to Pending.");
 
                 // Listen for new tracks
                 let (track_tx, track_rx) = flume::bounded(1);
                 peer.on_track(Box::new(move |maybe_track, _| {
+                    log::info!("track event triggered!");
                     let tx = track_tx.clone();
                     Box::pin(async move {
                         let remote_track = match maybe_track {
@@ -122,14 +128,11 @@ impl State {
                         tokio::spawn(async move {
                             use webrtc::track::track_local::TrackLocalWriter;
                             while let Ok((packet, _)) = remote_track.read_rtp().await {
-                                let err = match local_track.write_rtp(&packet).await {
-                                    Err(err) => err,
-                                    _ => continue,
-                                };
-                                if let webrtc::Error::ErrClosedPipe = err {
-                                    break;
-                                } else {
-                                    unimplemented!();
+                                log::trace!("received remote track packet");
+                                match local_track.write_rtp(&packet).await {
+                                    Ok(_) => log::trace!("written packet to local track"),
+                                    Err(webrtc::Error::ErrClosedPipe) => break,
+                                    _ => unimplemented!(),
                                 }
                             }
                         });
@@ -141,6 +144,7 @@ impl State {
                 let msg =
                     ws.try_next().await.expect("cannot retrieve offer").expect("stream closed").into_text().unwrap();
                 let offer = serde_json::from_str(&msg).expect("cannot deserialize offer");
+                log::info!("Received offer from remote host.");
 
                 // Send reply to the remote
                 peer.set_remote_description(offer).await.unwrap();
@@ -148,23 +152,26 @@ impl State {
                 let desc = serde_json::to_string(&answer).unwrap();
                 ws.send(Message::Text(desc)).await.expect("cannot send answer");
                 peer.set_local_description(answer).await.unwrap();
+                log::info!("Sent answer to the remote host.");
 
                 Some(track_rx)
             } else {
                 // Check if a host exists
-                let host = self.host.read().await;
-                let local_track = host.get_ready().expect("no host found");
-                peer.add_track(local_track.clone()).await.expect("cannot add local track");
+                let local_track = self.host.read().await.get_ready().expect("no host found").clone();
+                peer.add_track(local_track).await.expect("cannot add local track");
+                log::info!("Cloned local track to remote client.");
 
                 // Send remote an offer
                 let offer = peer.create_offer(None).await.unwrap();
                 let desc = serde_json::to_string(&offer).unwrap();
                 ws.send(Message::Text(desc)).await.expect("cannot send offer");
+                log::info!("Sent offer to remote client.");
 
                 // Wait for remote's answer
                 let desc =
                     ws.try_next().await.expect("cannot retrieve offer").expect("stream closed").into_text().unwrap();
                 let answer = serde_json::from_str(&desc).expect("cannot deserialize offer");
+                log::info!("Sent offer to remote client.");
 
                 peer.set_local_description(offer).await.unwrap();
                 peer.set_remote_description(answer).await.unwrap();
@@ -185,6 +192,7 @@ impl State {
                         let ice = ice_result.expect("ICE sender closed");
                         let json = serde_json::to_string(&ice).expect("ICE serialization failed");
                         ws.send(Message::Text(json)).await.expect("cannot send ICE candidate");
+                        log::info!("Sent ICE candidate to remote.");
                     }
                     msg_result = ws.try_next() => {
                         let ice = match msg_result.expect("WebSocket stream error").expect("WebSocket stream closed") {
@@ -193,10 +201,12 @@ impl State {
                             _ => continue,
                         };
                         peer.add_ice_candidate(ice).await.expect("cannot add ICE candidate");
+                        log::info!("Received ICE candidate from remote.");
                     }
                     track_result = track_fut => {
                         let track = track_result.expect("track channel closed");
                         self.host.write().await.set_ready(track);
+                        log::info!("Received track from remote host.");
                     }
                 }
             }

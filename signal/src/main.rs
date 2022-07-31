@@ -30,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         hyper::Server::from_tcp(tcp)?.http1_only(true).serve(service)
     };
 
+    env_logger::init();
     runtime.block_on(future)?;
     Ok(())
 }
