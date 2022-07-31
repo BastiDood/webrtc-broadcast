@@ -43,8 +43,8 @@ async function main() {
 
     await peer.setRemoteDescription(offer);
     const answer = await peer.createAnswer();
-    await peer.setLocalDescription(answer);
     ws.send(JSON.stringify(answer));
+    await peer.setLocalDescription(answer);
 }
 
-main();
+main().catch(console.error);

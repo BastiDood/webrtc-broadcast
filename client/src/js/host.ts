@@ -17,7 +17,6 @@ async function main() {
     peer.addEventListener('negotiationneeded', async function() {
         // Signal offer to the remote peer
         const offer = await this.createOffer();
-        await this.setLocalDescription(offer);
         ws.send(JSON.stringify(offer));
 
         // Extract the first message as the answer
@@ -27,6 +26,7 @@ async function main() {
             { passive: true, once: true, },
         ));
         await peer.setRemoteDescription(answer);
+        await this.setLocalDescription(offer);
 
         // Then keep receiving new ice candidates
         ws.addEventListener('message', ({ data }) => {
@@ -51,4 +51,4 @@ async function main() {
         peer.addTrack(track, media);
 }
 
-main();
+main().catch(console.error);
