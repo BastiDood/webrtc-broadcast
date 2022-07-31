@@ -6,7 +6,7 @@ async function main() {
     if (!isVideo) throw new Error('no video found');
 
     // Attempt to connect first and block until open
-    const ws = new WebSocket(process.env.WS_HOST!);
+    const ws = new WebSocket(process.env.WS_CLIENT!);
     await new Promise(resolve => ws.addEventListener('open', resolve, {
         passive: true,
         once: true,
