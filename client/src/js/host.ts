@@ -25,8 +25,8 @@ async function main() {
             ({ data }) => resolve(JSON.parse(data)),
             { passive: true, once: true, },
         ));
-        await peer.setRemoteDescription(answer);
         await this.setLocalDescription(offer);
+        await peer.setRemoteDescription(answer);
 
         // Then keep receiving new ice candidates
         ws.addEventListener('message', ({ data }) => {
