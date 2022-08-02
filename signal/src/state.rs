@@ -90,17 +90,19 @@ impl State {
 
             let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
             let peer = self.api.new_peer_connection(Default::default()).await.unwrap();
+            let arc_peer = Arc::new(peer);
 
             let (ice_tx, ice_rx) = flume::unbounded();
-            peer.on_ice_candidate(Box::new(move |maybe_ice| {
-                log::info!("icecandidate event triggered!");
-                let tx = ice_tx.clone();
-                if let Some(ice) = maybe_ice {
-                    let _ = tx.send(ice);
-                }
-                Box::pin(core::future::ready(()))
-            }))
-            .await;
+            arc_peer
+                .on_ice_candidate(Box::new(move |maybe_ice| {
+                    log::info!("icecandidate event triggered!");
+                    let tx = ice_tx.clone();
+                    if let Some(ice) = maybe_ice {
+                        let _ = tx.send(ice);
+                    }
+                    Box::pin(core::future::ready(()))
+                }))
+                .await;
 
             let maybe_track = if is_host {
                 // Mark this host as ready to receive
@@ -108,37 +110,63 @@ impl State {
                 log::info!("Set host state to Pending.");
 
                 // Listen for new tracks
+                let weak_peer_outer = Arc::downgrade(&arc_peer);
                 let (track_tx, track_rx) = flume::bounded(1);
-                peer.on_track(Box::new(move |maybe_track, _| {
-                    log::info!("track event triggered!");
-                    let tx = track_tx.clone();
-                    Box::pin(async move {
-                        let remote_track = match maybe_track {
-                            Some(track) => track,
-                            _ => return,
-                        };
+                arc_peer
+                    .on_track(Box::new(move |maybe_track, _| {
+                        log::info!("track event triggered!");
+                        let tx = track_tx.clone();
+                        let weak_peer = weak_peer_outer.clone();
+                        Box::pin(async move {
+                            let remote_track = match maybe_track {
+                                Some(track) => track,
+                                _ => return,
+                            };
 
-                        let local_track = Arc::new(TrackLocalStaticRTP::new(
-                            remote_track.codec().await.capability,
-                            "host-video".to_owned(),
-                            "host-stream".to_owned(),
-                        ));
-                        tx.send_async(local_track.clone()).await.expect("track receiver closed");
+                            let local_track = Arc::new(TrackLocalStaticRTP::new(
+                                remote_track.codec().await.capability,
+                                "host-video".to_owned(),
+                                "host-stream".to_owned(),
+                            ));
+                            tx.send_async(local_track.clone()).await.expect("track receiver closed");
 
-                        tokio::spawn(async move {
-                            use webrtc::track::track_local::TrackLocalWriter;
-                            while let Ok((packet, _)) = remote_track.read_rtp().await {
-                                log::trace!("received remote track packet");
-                                match local_track.write_rtp(&packet).await {
-                                    Ok(_) => log::trace!("written packet to local track"),
-                                    Err(webrtc::Error::ErrClosedPipe) => break,
-                                    _ => unimplemented!(),
+                            let media_ssrc = remote_track.ssrc();
+                            tokio::spawn(async move {
+                                let mut interval = tokio::time::interval(core::time::Duration::from_secs(3));
+                                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+                                loop {
+                                    use webrtc::{
+                                        rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
+                                        track::track_local::TrackLocalWriter,
+                                    };
+                                    let packet = tokio::select! {
+                                        _ = interval.tick() => {
+                                            if let Some(peer) = weak_peer.upgrade() {
+                                                peer.write_rtcp(&[Box::new(PictureLossIndication { sender_ssrc: 0, media_ssrc })])
+                                                    .await
+                                                    .expect("cannot send PLI packet");
+                                                log::trace!("Sent PLI packet to remote.");
+                                                continue;
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        Ok((packet, _)) = remote_track.read_rtp() => packet,
+                                        else => unimplemented!(),
+                                    };
+
+                                    log::trace!("Received remote track packet.");
+                                    match local_track.write_rtp(&packet).await {
+                                        Ok(_) => log::trace!("Written packet to local track."),
+                                        Err(webrtc::Error::ErrClosedPipe) => break,
+                                        _ => unimplemented!(),
+                                    }
                                 }
-                            }
-                        });
-                    })
-                }))
-                .await;
+                            });
+                        })
+                    }))
+                    .await;
 
                 // Wait for the remote to send an offer first
                 let msg =
@@ -147,22 +175,22 @@ impl State {
                 log::info!("Received offer from remote host.");
 
                 // Send reply to the remote
-                peer.set_remote_description(offer).await.unwrap();
-                let answer = peer.create_answer(None).await.unwrap();
+                arc_peer.set_remote_description(offer).await.unwrap();
+                let answer = arc_peer.create_answer(None).await.unwrap();
                 let desc = serde_json::to_string(&answer).unwrap();
                 ws.send(Message::Text(desc)).await.expect("cannot send answer");
-                peer.set_local_description(answer).await.unwrap();
+                arc_peer.set_local_description(answer).await.unwrap();
                 log::info!("Sent answer to the remote host.");
 
                 Some(track_rx)
             } else {
                 // Check if a host exists
                 let local_track = self.host.read().await.get_ready().expect("no host found").clone();
-                peer.add_track(local_track).await.expect("cannot add local track");
+                arc_peer.add_track(local_track).await.expect("cannot add local track");
                 log::info!("Cloned local track to remote client.");
 
                 // Send remote an offer
-                let offer = peer.create_offer(None).await.unwrap();
+                let offer = arc_peer.create_offer(None).await.unwrap();
                 let desc = serde_json::to_string(&offer).unwrap();
                 ws.send(Message::Text(desc)).await.expect("cannot send offer");
                 log::info!("Sent offer to remote client.");
@@ -173,8 +201,8 @@ impl State {
                 let answer = serde_json::from_str(&desc).expect("cannot deserialize offer");
                 log::info!("Sent offer to remote client.");
 
-                peer.set_local_description(offer).await.unwrap();
-                peer.set_remote_description(answer).await.unwrap();
+                arc_peer.set_local_description(offer).await.unwrap();
+                arc_peer.set_remote_description(answer).await.unwrap();
                 None
             };
 
@@ -200,7 +228,7 @@ impl State {
                             Message::Close(_) => break,
                             _ => continue,
                         };
-                        peer.add_ice_candidate(ice).await.expect("cannot add ICE candidate");
+                        arc_peer.add_ice_candidate(ice).await.expect("cannot add ICE candidate");
                         log::info!("Received ICE candidate from remote.");
                     }
                     track_result = track_fut => {
