@@ -1,10 +1,31 @@
 import { config } from './peer';
 
 async function main() {
-    const video = document.getElementById('screen');
-    const isVideo = video instanceof HTMLVideoElement;
-    if (!isVideo)
-        throw new Error('no video found');
+
+    const select = document.getElementById('input-selection');
+    const isSelect = select instanceof HTMLSelectElement;
+    if (!isSelect)
+        throw new Error('input selector not found');
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    for (const dev of devices) {
+        if (dev.kind !== 'videoinput')
+            continue;
+
+        const option = document.createElement('option');
+        option.innerText = dev.label || 'Unknown';
+        option.value = dev.deviceId;
+        select.appendChild(option);
+    }
+
+    // Wait for user to select item
+    const { target } = await new Promise<Event>(resolve => select.addEventListener('change', resolve, {
+        passive: true,
+        once: true,
+    }));
+    const isOption = target instanceof HTMLSelectElement;
+    if (!isOption)
+        throw new Error('<option> element not found');
 
     const ws = new WebSocket(process.env.WS_HOST!);
     await new Promise(resolve => ws.addEventListener('open', resolve, {
@@ -45,10 +66,20 @@ async function main() {
     });
 
     // Request camera so that negotiation begins
-    const media = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-    video.srcObject = media;
+    const media = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { deviceId: { exact: target.value } },
+    });
     for (const track of media.getVideoTracks())
         peer.addTrack(track, media);
+
+    // Create <video> for self-view
+    const video = document.createElement('video');
+    video.playsInline = true;
+    video.autoplay = true;
+    video.muted = true;
+    video.srcObject = media;
+    select.replaceWith(video);
 }
 
 main().catch(console.error);
