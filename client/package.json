@@ -11,6 +11,8 @@
     },
     "devDependencies": {
         "@types/node": "^18.6.3",
-        "parcel": "^2.7.0"
+        "cssnano": "^5.1.12",
+        "parcel": "^2.7.0",
+        "postcss": "^8.4.14"
     }
 }
