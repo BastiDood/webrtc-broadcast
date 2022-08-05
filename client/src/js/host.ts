@@ -8,6 +8,7 @@ async function main() {
 
     const devices = await navigator.mediaDevices.enumerateDevices();
     const select = document.createElement('select');
+    select.title = 'Select Video Device';
     select.required = true;
 
     for (const { kind, label, deviceId } of devices)
