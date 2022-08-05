@@ -10,11 +10,11 @@ async function main() {
     const select = document.createElement('select');
     select.required = true;
 
-    for (const dev of devices)
-        if (dev.kind === 'videoinput') {
+    for (const { kind, label, deviceId } of devices)
+        if (kind === 'videoinput') {
             const option = document.createElement('option');
-            option.innerText = dev.label || 'Unknown';
-            option.value = dev.deviceId;
+            option.innerText = label || 'Unknown';
+            option.value = deviceId;
             select.appendChild(option);
         }
 
