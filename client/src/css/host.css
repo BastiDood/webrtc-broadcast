@@ -1,0 +1,12 @@
+@import 'global.css';
+
+select, input[type=submit] {
+    padding: 0.25rem;
+}
+
+video {
+    box-sizing: border-box;
+    border: 0.25rem solid #26784e;
+    border-radius: 0.25rem;
+    width: 100vmin;
+}
