@@ -1607,6 +1607,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "flume",
+ "futures-util",
+ "hyper",
+ "log",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "webrtc",
+]
+
+[[package]]
 name = "sha-1"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1652,22 +1668,6 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest 0.10.3",
-]
-
-[[package]]
-name = "signal"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger",
- "flume",
- "futures-util",
- "hyper",
- "log",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "webrtc",
 ]
 
 [[package]]
