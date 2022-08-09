@@ -1,6 +1,5 @@
 use hyper::{Body, Request, Response, StatusCode};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use webrtc::{api::API, track::track_local::track_local_static_rtp::TrackLocalStaticRTP};
 
 #[derive(Default)]
@@ -106,7 +105,7 @@ impl State {
 
             let maybe_track = if is_host {
                 // Mark this host as ready to receive
-                self.host.write().await.set_pending();
+                self.host.write().unwrap().set_pending();
                 log::info!("Set host state to Pending.");
 
                 // Listen for new tracks
@@ -185,7 +184,7 @@ impl State {
                 Some(track_rx)
             } else {
                 // Check if a host exists
-                let local_track = self.host.read().await.get_ready().expect("no host found").clone();
+                let local_track = self.host.read().unwrap().get_ready().expect("no host found").clone();
                 arc_peer.add_track(local_track).await.expect("cannot add local track");
                 log::info!("Cloned local track to remote client.");
 
@@ -233,7 +232,7 @@ impl State {
                     }
                     track_result = track_fut => {
                         let track = track_result.expect("track channel closed");
-                        self.host.write().await.set_ready(track);
+                        self.host.write().unwrap().set_ready(track);
                         log::info!("Received track from remote host.");
                     }
                 }
